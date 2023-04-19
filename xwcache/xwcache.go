@@ -5,6 +5,7 @@ import (
 	"log"
 	"sync"
 	"xwace/xwcache/xwcache/lru"
+	"xwace/xwcache/xwcache/singleflight"
 )
 
 type Getter interface {
@@ -16,6 +17,7 @@ type Group struct {
 	getter      Getter
 	mainCache   cache
 	peersPicker PeerPicker
+	sg          *singleflight.Group
 }
 
 var (
@@ -23,6 +25,7 @@ var (
 	groups = make(map[string]*Group)
 )
 
+// Getter是从db溯源的实现
 func NewGroup(name string, cacheByte int64, getter Getter) *Group {
 	mu.Lock()
 	defer mu.Unlock()
@@ -34,6 +37,7 @@ func NewGroup(name string, cacheByte int64, getter Getter) *Group {
 			lru:        lru.NewCache(cacheByte, nil),
 			cacheBytes: cacheByte,
 		},
+		sg: &singleflight.Group{},
 	}
 	groups[name] = g
 	return g
@@ -51,14 +55,26 @@ func (g *Group) Get(key string) (*ImmutableByte, error) {
 		return nil, fmt.Errorf("不支持null key")
 	}
 	if value, ok := g.mainCache.get(key); ok {
-		log.Println("[GeeCache] hit")
+		log.Println("[Cache] hit")
 		return value, nil
 	}
-	return g.load(key)
+
+	v, err := g.sg.Do(key, func() (interface{}, error) {
+		return g.load(key)
+	})
+	return v.(*ImmutableByte), err
 }
 
-func (g *Group) load(key string) (*ImmutableByte, error) {
-	//目前直接调用回调函数
+func (g *Group) load(key string) (i *ImmutableByte, err error) {
+	if g.peersPicker != nil { //则先尝试从其他节点获取
+		if peer, ok := g.peersPicker.PickPeer(key); ok {
+			if bytes, err := peer.Get(g.name, key); err == nil {
+				return &ImmutableByte{bytes}, nil
+			}
+			log.Println("[Cache] Failed to get from peer", err)
+		}
+	}
+	//若还是没有，则直接调用回调函数，查db
 	return g.getLocally(key)
 }
 

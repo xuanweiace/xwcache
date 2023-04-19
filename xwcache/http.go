@@ -17,14 +17,14 @@ const (
 )
 
 // HTTPPool implements PeerPicker for a pool of HTTP peers.
-// 只需要一个
+// 每个Cache进程实例只需要一个
 type HTTPPool struct {
 	// this peer's base URL, e.g. "https://example.net:8000"
-	self       string
-	basePath   string
-	mu         sync.Mutex //把加锁放到这里，而不是在Hash里
-	peers      *consistenthash.Hash
-	httpClient map[string]*httpClient // keyed by e.g. "http://10.0.0.2:8008" 多个节点
+	self        string
+	basePath    string
+	mu          sync.Mutex             //把加锁放到这里，而不是在Hash里
+	hashCircler *consistenthash.Hash   // 作用就是1.添加节点， 2.根据key，获得节点的机器号key
+	httpClient  map[string]*httpClient // keyed by e.g. "http://10.0.0.2:8008" 多个节点
 }
 
 // NewHTTPPool initializes an HTTP pool of peers.
@@ -77,8 +77,8 @@ func (p *HTTPPool) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 func (p *HTTPPool) Set(peers ...string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	p.peers = consistenthash.NewConsistentHash(defaultReplicas, nil)
-	p.peers.AddNode(peers...)
+	p.hashCircler = consistenthash.NewConsistentHash(defaultReplicas, nil)
+	p.hashCircler.AddNode(peers...)
 	p.httpClient = make(map[string]*httpClient, len(peers))
 	for _, peer := range peers {
 		p.httpClient[peer] = &httpClient{baseURL: peer + p.basePath}
@@ -90,7 +90,7 @@ func (p *HTTPPool) Set(peers ...string) {
 func (p *HTTPPool) PickPeer(key string) (PeerGetter, bool) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
-	if peer := p.peers.Get(key); peer != "" && peer != p.self {
+	if peer := p.hashCircler.Get(key); peer != "" && peer != p.self {
 		p.Log("Pick peer %s", peer)
 		return p.httpClient[peer], true
 	}
